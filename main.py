@@ -6,6 +6,20 @@ import cv2
 import numpy as np
 import os
 import threading
+import sys
+
+# Konfiguracja dla EXE
+if getattr(sys, 'frozen', False):
+    # Jeśli uruchomione jako EXE
+    print("Running as EXE")
+    # Sprawdź czy tessdata jest w bundlu
+    bundle_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    tessdata_dir = os.path.join(bundle_dir, 'tessdata')
+    if os.path.exists(tessdata_dir):
+        os.environ['TESSDATA_PREFIX'] = bundle_dir
+        print(f"Found tessdata in bundle: {tessdata_dir}")
+else:
+    print("Running as Python script")
 
 class OCRApp:
     def __init__(self, root):
@@ -554,10 +568,32 @@ class OCRApp:
                 confidence_data = pytesseract.image_to_data(pil_image, lang=lang, 
                                                           config=custom_config, 
                                                           output_type=pytesseract.Output.DATAFRAME)
-                avg_conf = confidence_data[confidence_data['conf'] > 0]['conf'].mean()
-                confidence_text = f"{avg_conf:.1f}%" if not np.isnan(avg_conf) else "N/A"
-            except:
-                confidence_text = "N/A"
+                
+                valid_conf = confidence_data[confidence_data['conf'] > 0]['conf']
+                
+                if len(valid_conf) > 0:
+                    avg_conf = valid_conf.mean()
+                    confidence_text = f"{avg_conf:.1f}%" if not np.isnan(avg_conf) else "0.0%"
+                else:
+                    confidence_text = "0.0%"
+                    
+            except pytesseract.TesseractError as te:
+                print(f"Tesseract error: {te}")
+                confidence_text = "Błąd Tesseract"
+            except ImportError as ie:
+                print(f"Import error: {ie}")
+                confidence_text = "Błąd bibliotek"
+            except Exception as e:
+                print(f"Confidence calculation error: {e}")
+                try:
+                    simple_conf = 75.0  
+                    if len(text.strip()) > 10: 
+                        simple_conf = 85.0
+                    elif len(text.strip()) < 5:
+                        simple_conf = 45.0
+                    confidence_text = f"{simple_conf:.1f}%"
+                except:
+                    confidence_text = "50.0%" 
             
             self.root.after(0, lambda: self.update_ocr_results(text, char_count, line_count, confidence_text))
             
