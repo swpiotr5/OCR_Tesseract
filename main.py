@@ -179,7 +179,7 @@ class OCRApp:
         
         self.lang_var = tk.StringVar(value="eng")
         lang_combo = ttk.Combobox(lang_frame, textvariable=self.lang_var, 
-                                 values=["🇺🇸 eng", "🇵🇱 pol", "🌍 pol+eng"], 
+                                 values=["🇺🇸 eng", "🇵🇱 pol", "deu", "🌍 pol+eng", "🌍 pol+deu", "🌍 eng+deu", "🌍 pol+eng+deu"], 
                                  state="readonly", width=25, font=('Segoe UI', 10))
         lang_combo.pack(fill=tk.X)
         
