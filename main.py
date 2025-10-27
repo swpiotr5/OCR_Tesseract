@@ -71,8 +71,6 @@ class OCRApp:
         
         self.setup_styles()
         
-        pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-        
         self.current_image = None
         self.processed_image = None
         self.original_image_path = None
