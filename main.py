@@ -8,18 +8,49 @@ import os
 import threading
 import sys
 
-# Konfiguracja dla EXE
-if getattr(sys, 'frozen', False):
-    # Jeśli uruchomione jako EXE
-    print("Running as EXE")
-    # Sprawdź czy tessdata jest w bundlu
-    bundle_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-    tessdata_dir = os.path.join(bundle_dir, 'tessdata')
-    if os.path.exists(tessdata_dir):
-        os.environ['TESSDATA_PREFIX'] = bundle_dir
-        print(f"Found tessdata in bundle: {tessdata_dir}")
-else:
-    print("Running as Python script")
+def setup_tesseract():
+    if getattr(sys, 'frozen', False):
+        print("Running as EXE")
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        local_tesseract = os.path.join(exe_dir, 'Tesseract-OCR', 'tesseract.exe')
+        
+        if os.path.exists(local_tesseract):
+            print(f"Found local Tesseract: {local_tesseract}")
+            pytesseract.pytesseract.tesseract_cmd = local_tesseract
+            tessdata_path = os.path.join(exe_dir, 'Tesseract-OCR', 'tessdata')
+            if os.path.exists(tessdata_path):
+                os.environ['TESSDATA_PREFIX'] = tessdata_path
+                print(f"Set TESSDATA_PREFIX to: {os.environ['TESSDATA_PREFIX']}")
+            return True
+        else:
+            print(f"Local Tesseract not found at: {local_tesseract}")
+            return False
+    else:
+        print("Running as Python script")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        local_tesseract = os.path.join(script_dir, 'Tesseract-OCR', 'tesseract.exe')
+        
+        if os.path.exists(local_tesseract):
+            print(f"Found local Tesseract: {local_tesseract}")
+            pytesseract.pytesseract.tesseract_cmd = local_tesseract
+            tessdata_path = os.path.join(script_dir, 'Tesseract-OCR', 'tessdata')
+            if os.path.exists(tessdata_path):
+                os.environ['TESSDATA_PREFIX'] = tessdata_path
+                print(f"Set TESSDATA_PREFIX to: {os.environ['TESSDATA_PREFIX']}")
+            return True
+        else:
+            print("Local Tesseract not found, trying system installation")
+            system_tesseract = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+            if os.path.exists(system_tesseract):
+                pytesseract.pytesseract.tesseract_cmd = system_tesseract
+                print(f"Using system Tesseract: {system_tesseract}")
+                return True
+            else:
+                print("System Tesseract not found!")
+                return False
+
+
+setup_tesseract()
 
 class OCRApp:
     def __init__(self, root):
