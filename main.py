@@ -7,6 +7,19 @@ import numpy as np
 import os
 import threading
 import sys
+import re
+from difflib import SequenceMatcher
+from collections import Counter
+import json
+import time
+
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    print("⚠️ Sklearn niedostępne - używam prostszych metod podobieństwa")
 
 def setup_tesseract():
     if getattr(sys, 'frozen', False):
@@ -48,6 +61,162 @@ def setup_tesseract():
             else:
                 print("System Tesseract not found!")
                 return False
+
+def calculate_text_similarity(text1, text2):
+    if not text1.strip() or not text2.strip():
+        return 0.0
+    
+    text1_clean = re.sub(r'[^\w\s]', ' ', text1.lower().strip())
+    text2_clean = re.sub(r'[^\w\s]', ' ', text2.lower().strip())
+    text1_clean = re.sub(r'\s+', ' ', text1_clean)
+    text2_clean = re.sub(r'\s+', ' ', text2_clean)
+    
+    if SKLEARN_AVAILABLE:
+        try:
+            vectorizer = TfidfVectorizer(
+                stop_words=None,  
+                ngram_range=(1, 2),  
+                max_features=1000,
+                min_df=1,
+                lowercase=True
+            )
+            
+            tfidf_matrix = vectorizer.fit_transform([text1_clean, text2_clean])
+            
+            cos_sim = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
+            
+            return float(cos_sim)
+            
+        except Exception as e:
+            print(f"Błąd sklearn: {e}, używam metody fallback")
+            pass
+    
+    return calculate_cosine_similarity_manual(text1_clean, text2_clean)
+
+def calculate_cosine_similarity_manual(text1, text2):
+    try:
+        words1 = text1.split()
+        words2 = text2.split()
+        
+        if not words1 or not words2:
+            return 0.0
+        
+        all_words = set(words1 + words2)
+        
+        if len(all_words) == 0:
+            return 0.0
+        
+        def create_tf_vector(words, vocabulary):
+            vector = []
+            word_counts = Counter(words)
+            total_words = len(words)
+            
+            for word in vocabulary:
+                tf = word_counts[word] / total_words if total_words > 0 else 0
+                vector.append(tf)
+            return vector
+        
+        vocabulary = sorted(all_words)
+        vector1 = create_tf_vector(words1, vocabulary)
+        vector2 = create_tf_vector(words2, vocabulary)
+        
+        dot_product = sum(a * b for a, b in zip(vector1, vector2))
+        magnitude1 = sum(a * a for a in vector1) ** 0.5
+        magnitude2 = sum(b * b for b in vector2) ** 0.5
+        
+        if magnitude1 == 0 or magnitude2 == 0:
+            return 0.0
+        
+        cosine_sim = dot_product / (magnitude1 * magnitude2)
+        
+        set1 = set(words1)
+        set2 = set(words2)
+        jaccard_sim = len(set1.intersection(set2)) / len(set1.union(set2)) if len(set1.union(set2)) > 0 else 0
+        
+        final_similarity = cosine_sim * 0.8 + jaccard_sim * 0.2
+        
+        return min(max(final_similarity, 0.0), 1.0) 
+        
+    except Exception as e:
+        print(f"Błąd w obliczaniu podobieństwa: {e}")
+        return SequenceMatcher(None, text1, text2).ratio()
+
+def extract_text_from_image(image_path, lang="pol+eng"):
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            return ""
+        
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        height, width = gray.shape
+        gray_resized = cv2.resize(gray, (width * 2, height * 2), interpolation=cv2.INTER_CUBIC)
+        
+        custom_config = '--oem 1 --psm 6'
+        pil_img = Image.fromarray(gray_resized)
+        text = pytesseract.image_to_string(pil_img, lang=lang, config=custom_config)
+        
+        return text.strip()
+    except Exception as e:
+        print(f"Błąd OCR dla {image_path}: {e}")
+        return ""
+
+def find_similar_images(reference_image_path, search_folder, similarity_threshold=0.3, lang="pol+eng"):
+    print(f"Analizuję obraz referencyjny: {reference_image_path}")
+    reference_text = extract_text_from_image(reference_image_path, lang)
+    
+    if not reference_text.strip():
+        return [], "Nie znaleziono tekstu w obrazie referencyjnym"
+    
+    print(f"Tekst referencyjny: {reference_text[:100]}...")
+    
+    supported_formats = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.gif')
+    
+    image_files = []
+    try:
+        for file in os.listdir(search_folder):
+            if file.lower().endswith(supported_formats):
+                full_path = os.path.join(search_folder, file)
+                if os.path.abspath(full_path) != os.path.abspath(reference_image_path):
+                    image_files.append(full_path)
+    except Exception as e:
+        return [], f"Błąd odczytu folderu: {e}"
+    
+    if not image_files:
+        return [], "Nie znaleziono obrazów w folderze"
+    
+    print(f"Znaleziono {len(image_files)} obrazów do analizy")
+    
+    similar_images = []
+    
+    for i, img_path in enumerate(image_files, 1):
+        try:
+            print(f"Analizuję {i}/{len(image_files)}: {os.path.basename(img_path)}")
+            
+            img_text = extract_text_from_image(img_path, lang)
+            
+            if img_text.strip():
+                similarity = calculate_text_similarity(reference_text, img_text)
+                
+                if similarity >= similarity_threshold:
+                    similar_images.append({
+                        'path': img_path,
+                        'filename': os.path.basename(img_path),
+                        'similarity': similarity,
+                        'text': img_text[:200] + "..." if len(img_text) > 200 else img_text
+                    })
+                    print(f"  ✅ Podobieństwo: {similarity:.2%}")
+                else:
+                    print(f"  ❌ Podobieństwo: {similarity:.2%} (poniżej progu)")
+            else:
+                print(f"  ⚠️ Brak tekstu")
+                
+        except Exception as e:
+            print(f"  ❌ Błąd: {e}")
+    
+    similar_images.sort(key=lambda x: x['similarity'], reverse=True)
+    
+    return similar_images, ""
 
 
 setup_tesseract()
@@ -289,6 +458,8 @@ class OCRApp:
                   command=self.process_image).grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(5, 0), pady=2)
         ttk.Button(btn_frame, text="🔍 Uruchom OCR", style='Success.TButton',
                   command=self.run_ocr).grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(5, 2))
+        ttk.Button(btn_frame, text="🔎 Znajdź podobne", style='Primary.TButton',
+                  command=self.find_similar_images_dialog).grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(5, 2))
         
         btn_frame.columnconfigure(0, weight=1)
         btn_frame.columnconfigure(1, weight=1)
@@ -673,6 +844,229 @@ class OCRApp:
             self.confidence_value.config(foreground=color)
         
         self.status_label.config(text=f"✅ OCR zakończone - znaleziono {char_count} znaków")
+    
+    def find_similar_images_dialog(self):
+        if self.original_image_path is None:
+            messagebox.showwarning("⚠️ Uwaga", "Najpierw wczytaj obraz referencyjny")
+            return
+        
+        search_folder = filedialog.askdirectory(
+            title="Wybierz folder do przeszukania podobnych obrazów",
+            initialdir=os.path.dirname(self.original_image_path)
+        )
+        
+        if not search_folder:
+            return
+        
+        self.show_similarity_options_dialog(search_folder)
+    
+    def show_similarity_options_dialog(self, search_folder):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("🔎 Opcje wyszukiwania podobnych obrazów")
+        dialog.geometry("480x480")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        main_frame = ttk.Frame(dialog, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        title_label = ttk.Label(main_frame, text="🔎 Wyszukiwanie podobnych obrazów", 
+                               font=('Segoe UI', 14, 'bold'), foreground=self.colors['dark'])
+        title_label.pack(pady=(0, 15))
+
+        method_info = "🧮 Metoda: "
+        if SKLEARN_AVAILABLE:
+            method_info += "Podobieństwo kosinusowe TF-IDF (zaawansowane)"
+        else:
+            method_info += "Podobieństwo kosinusowe ręczne (podstawowe)"
+        
+        method_label = ttk.Label(main_frame, text=method_info, 
+                                font=('Segoe UI', 9), foreground=self.colors['gray'])
+        method_label.pack(pady=(0, 10))
+
+        ref_frame = ttk.LabelFrame(main_frame, text="📷 Obraz referencyjny", padding="10")
+        ref_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        ref_filename = os.path.basename(self.original_image_path)
+        ttk.Label(ref_frame, text=f"📄 {ref_filename}", font=('Segoe UI', 9)).pack(anchor=tk.W)
+        ttk.Label(ref_frame, text=f"📁 {search_folder}", font=('Segoe UI', 9), 
+                 foreground=self.colors['gray']).pack(anchor=tk.W)
+
+        options_frame = ttk.LabelFrame(main_frame, text="⚙️ Ustawienia", padding="10")
+        options_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        lang_frame = ttk.Frame(options_frame)
+        lang_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(lang_frame, text="🌐 Język OCR:", font=('Segoe UI', 9, 'bold')).pack(side=tk.LEFT)
+        
+        lang_var = tk.StringVar(value="pol+eng")
+        lang_combo = ttk.Combobox(lang_frame, textvariable=lang_var, 
+                                 values=["eng", "pol", "pol+eng", "deu", "deu+eng"], 
+                                 state="readonly", width=15)
+        lang_combo.pack(side=tk.RIGHT)
+        
+        threshold_frame = ttk.Frame(options_frame)
+        threshold_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(threshold_frame, text="🎯 Próg podobieństwa:", font=('Segoe UI', 9, 'bold')).pack(side=tk.LEFT)
+        
+        threshold_var = tk.DoubleVar(value=0.3)
+        threshold_scale = ttk.Scale(threshold_frame, from_=0.1, to=0.9, variable=threshold_var,
+                                   orient=tk.HORIZONTAL, length=150)
+        threshold_scale.pack(side=tk.RIGHT, padx=(10, 0))
+        
+        threshold_label = ttk.Label(threshold_frame, text="30%", font=('Segoe UI', 9))
+        threshold_label.pack(side=tk.RIGHT, padx=(5, 5))
+        
+        def update_threshold_label(value):
+            threshold_label.config(text=f"{int(float(value)*100)}%")
+        
+        threshold_scale.configure(command=update_threshold_label)
+        
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(30, 0))
+        
+        def start_search():
+            dialog.destroy()
+            self.search_similar_images_thread(search_folder, lang_var.get(), threshold_var.get())
+
+        buttons_container = ttk.Frame(main_frame, padding="15")
+        buttons_container.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Button(buttons_container, text="❌ Anuluj", command=dialog.destroy, 
+                  style='Secondary.TButton').pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(buttons_container, text="🔍 Rozpocznij wyszukiwanie", command=start_search, 
+                  style='Primary.TButton').pack(side=tk.RIGHT, padx=(10, 0))
+    
+    def search_similar_images_thread(self, search_folder, lang, threshold):
+        self.start_progress()
+        self.status_label.config(text="🔎 Wyszukiwanie podobnych obrazów...")
+        
+        def search_worker():
+            try:
+                similar_images, error = find_similar_images(
+                    self.original_image_path, 
+                    search_folder, 
+                    threshold, 
+                    lang
+                )
+                
+                self.root.after(0, lambda: self.show_similarity_results(similar_images, error, search_folder))
+                
+            except Exception as e:
+                error_msg = f"Błąd podczas wyszukiwania:\n{str(e)}"
+                self.root.after(0, lambda: messagebox.showerror("❌ Błąd", error_msg))
+            finally:
+                self.root.after(0, self.stop_progress)
+        
+        thread = threading.Thread(target=search_worker)
+        thread.daemon = True
+        thread.start()
+    
+    def show_similarity_results(self, similar_images, error, search_folder):
+        if error:
+            messagebox.showerror("❌ Błąd", error)
+            self.status_label.config(text="❌ Błąd wyszukiwania")
+            return
+        
+        if not similar_images:
+            messagebox.showinfo("ℹ️ Informacja", "Nie znaleziono podobnych obrazów")
+            self.status_label.config(text="✅ Wyszukiwanie zakończone - brak wyników")
+            return
+        
+        results_window = tk.Toplevel(self.root)
+        results_window.title(f"🔎 Znalezione podobne obrazy ({len(similar_images)})")
+        results_window.geometry("800x600")
+        results_window.transient(self.root)
+        
+        main_frame = ttk.Frame(results_window, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        title_frame = ttk.Frame(main_frame)
+        title_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        ttk.Label(title_frame, text=f"🔎 Znaleziono {len(similar_images)} podobnych obrazów", 
+                 font=('Segoe UI', 14, 'bold'), foreground=self.colors['primary']).pack(side=tk.LEFT)
+        
+        list_frame = ttk.Frame(main_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        
+        columns = ('Plik', 'Podobieństwo', 'Tekst')
+        results_tree = ttk.Treeview(list_frame, columns=columns, show='headings', height=15)
+
+        results_tree.heading('Plik', text='📄 Nazwa pliku')
+        results_tree.heading('Podobieństwo', text='🎯 Podobieństwo')
+        results_tree.heading('Tekst', text='📝 Fragment tekstu')
+        
+        results_tree.column('Plik', width=200)
+        results_tree.column('Podobieństwo', width=100, anchor='center')
+        results_tree.column('Tekst', width=400)
+        
+        for img_data in similar_images:
+            similarity_percent = f"{img_data['similarity']:.1%}"
+            text_preview = img_data['text'][:100] + "..." if len(img_data['text']) > 100 else img_data['text']
+            
+            results_tree.insert('', 'end', values=(
+                img_data['filename'],
+                similarity_percent,
+                text_preview
+            ), tags=('result',))
+        
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=results_tree.yview)
+        results_tree.configure(yscrollcommand=scrollbar.set)
+        
+        results_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        def open_selected():
+            selection = results_tree.selection()
+            if selection:
+                item = results_tree.item(selection[0])
+                filename = item['values'][0]
+                for img_data in similar_images:
+                    if img_data['filename'] == filename:
+                        os.startfile(img_data['path']) 
+                        break
+        
+        def export_results():
+            try:
+                export_path = filedialog.asksaveasfilename(
+                    title="Zapisz wyniki",
+                    defaultextension=".json",
+                    filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+                )
+                
+                if export_path:
+                    export_data = {
+                        'reference_image': self.original_image_path,
+                        'search_folder': search_folder,
+                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                        'results_count': len(similar_images),
+                        'results': similar_images
+                    }
+                    
+                    with open(export_path, 'w', encoding='utf-8') as f:
+                        json.dump(export_data, f, ensure_ascii=False, indent=2)
+                    
+                    messagebox.showinfo("✅ Sukces", f"Wyniki zapisane do:\n{export_path}")
+            except Exception as e:
+                messagebox.showerror("❌ Błąd", f"Nie można zapisać pliku:\n{e}")
+        
+        ttk.Button(btn_frame, text="📂 Otwórz plik", command=open_selected).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="💾 Eksportuj wyniki", command=export_results).pack(side=tk.LEFT, padx=(5, 5))
+        ttk.Button(btn_frame, text="❌ Zamknij", command=results_window.destroy).pack(side=tk.RIGHT)
+        
+        self.status_label.config(text=f"✅ Znaleziono {len(similar_images)} podobnych obrazów")
     
     def start_progress(self):
         self.progress.start(10)
